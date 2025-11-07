@@ -1,112 +1,97 @@
+/**
+ * server.ts - Wrapper around the Forester executable
+ *
+ * This module provides functions to interact with the Forester command-line tool,
+ * including querying for trees and executing commands.
+ */
+
 import * as vscode from 'vscode';
 import * as util from 'util';
 import * as child_process from 'child_process';
+import { getRoot } from "./utils";
 
 const execFile = util.promisify(child_process.execFile);
 
 // See lib/render/Render_json.ml in forester
-export interface OldQueryResult {
-  title: string | null,
-  taxon: string | null,
-  tags: string[],
-  route: string,
-  metas: Map<string, string>
+export interface ForesterTree {
+  title: string | null;
+  taxon: string | null;
+  tags: string[];
+  route: string;
+  metas: Map<string, string>;
+  sourcePath: string;
+  uri: string;
 }
 
-export interface NewQueryResult extends OldQueryResult {
-  uri: string
-}
+export type Forest = ForesterTree[];
 
-type OldQuery = {[key: string]: OldQueryResult};
-export type NewQuery = NewQueryResult[];
+// handles actually calling forester
+export async function queryForest(): Promise<Forest> {
+  const cwd = getRoot().fsPath;
 
-// TODO remove duplicate code
-export async function query(root: vscode.Uri, token: vscode.CancellationToken)
-  : Promise<NewQuery> {
-  // Get some configurations
-  const config = vscode.workspace.getConfiguration('forester');
-  const path : string = config.get('path') ?? "forester";
-  const configfile : string | undefined = config.get('config');
+  const config = vscode.workspace.getConfiguration("forester");
+  const path = config.get("path") as string ?? "forester";
+  const configfile = config.get("config") as string;
 
-  // Spawn process
-  let forester = child_process.spawn(
-    path,
-    ["query", "all",
-      ...(configfile ? [configfile] : [])],
-    {
-      cwd: root.fsPath,
-      detached: false,
-      stdio: 'pipe',
-      windowsHide: true
-    }
-  );
+  const args = ["query", "all", ...(configfile ? [configfile] : [])]
+  let forester = child_process.spawn(path, args, { cwd, detached: false, stdio: "pipe", windowsHide: true });
 
-  const killswitch = token.onCancellationRequested(
-    () => {
-      console.log("Forester: killing unfinished query.");
-      forester.kill();
-    }
-  );
+  let timeoutToken
+  let stderr = ""
+  let stdout = ""
+  forester.stderr.on("data", (chunk) => { stderr += chunk });
+  forester.stdout.on("data", (chunk) => { stdout += chunk });
 
-  var stderr = '', stdout = '';
-  forester.stderr.on('data', chunk => {
-    stderr += chunk;
-  });
-  forester.stdout.on('data', chunk => {
-    stdout += chunk;
-  });
+  const [success, dataOrErrorMessage] = await new Promise<[boolean, { string: Omit<ForesterTree, 'uri'> } | Forest | string]>((resolve) => {
+    timeoutToken = setTimeout(() => {
+      resolve([false, 'Forester timed out after 30s'])
+      forester.kill()
+    }, 30000)
 
-  let [code, signal] = await util.promisify((callback) => {
-    forester.on('close', (code, signal) => {
-      console.log(`Forester: process exited with code ${code} and signal ${signal}.`);
-      killswitch.dispose();
-      callback(undefined, [code, signal]);
-    });
-  })() as [number | null, NodeJS.Signals | null];
+    forester.once('error', (error) => {
+      vscode.window.showWarningMessage(`Forester: Critical error - ${error.message}`);
+      resolve([false, error.message])
+    })
 
-  if (stderr) {
-    vscode.window.showErrorMessage(stderr);
-  } else if (signal !== null) {
-    // It's killed, probably by ourselves.
-    return [];
-  } else if (code !== 0) {
-    vscode.window.showErrorMessage(`Forester exited with code ${code}.`);
-  }
+    forester.once('close', (code, signal) => {
+      if (signal !== null || code !== 0) {
+        resolve([false, `Forester: process exited with code ${code} and signal ${signal}.`])
+      } else {
+        try {
+          const result = JSON.parse(stdout)
+          resolve([true, result])
+        } catch (e) {
+          resolve([false, "Forester didn't return a valid JSON response:\n" + stdout])
+        }
+      }
+    })
+  })
 
-  try {
-    return toNewQueryFormat(JSON.parse(stdout));
-  } catch (e : any) {
-    console.log(e);
-    if (stderr) {
-      // We've already shown an error message.
-      return [];
+  clearTimeout(timeoutToken)
+
+  if (success) {
+    if (Array.isArray(dataOrErrorMessage)) {
+      return dataOrErrorMessage as Forest // new query format
     } else {
-      // This is unexpected.
-      vscode.window.showErrorMessage("Forester didn't return a valid JSON response.");
-      return [];
+      return Object.entries(dataOrErrorMessage).map(([id, entry]) => ({ uri: id, ...entry })) // old query format
     }
-  }
-}
-
-export function toNewQueryFormat(query : OldQuery | NewQuery) : NewQuery {
-  if (Array.isArray(query)) {
-    return query;
   } else {
-    return Object.entries(query).map(([id, entry]) => {
-      return {
-        uri: id,
-        ...entry
-      };
-    }
-    );
+    const errorMessage = dataOrErrorMessage + (stdout ? '\n\n' + stdout : '') + (stderr ? '\n\n' + stderr : '')
+
+    console.log(errorMessage)
+    vscode.window.showErrorMessage("Forester query failed: " + errorMessage);
+
+    // if we can't get data, return empty array
+    return [];
   }
 }
 
-export async function command(root: vscode.Uri, command: string[]) {
+export async function command(command: string[]) {
   // Get some configurations
-  const config = vscode.workspace.getConfiguration('forester');
-  const path : string = config.get('path') ?? "forester";
-  const configfile : string | undefined = config.get('config');
+  const config = vscode.workspace.getConfiguration("forester");
+  const path: string = config.get("path") ?? "forester";
+  const configfile: string | undefined = config.get("config");
+  const root = getRoot();
 
   console.log(command);
 
@@ -116,14 +101,16 @@ export async function command(root: vscode.Uri, command: string[]) {
       configfile ? [...command, configfile] : command,
       {
         cwd: root.fsPath,
-        windowsHide: true
-      }
+        windowsHide: true,
+      },
     );
     if (stderr) {
       vscode.window.showErrorMessage(stderr);
     }
     return stdout;
-  } catch (e : any) {
-    vscode.window.showErrorMessage(e.toString());
+  } catch (e: any) {
+    const errorMessage = e.toString() + (e.stdout ? '\n\n' + e.stdout : '') + (e.stderr ? '\n\n' + e.stderr : '')
+
+    vscode.window.showErrorMessage(errorMessage);
   }
 }

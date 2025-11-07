@@ -22,6 +22,18 @@
         "title": "New Tree...",
         "category": "Forester",
         "icon": "$(diff-added)"
+      },
+      {
+        "command": "forester.setDefaultPrefix",
+        "title": "Set Default Prefix",
+        "category": "Forester",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "forester.setDefaultTemplate",
+        "title": "Set Default Template",
+        "category": "Forester",
+        "icon": "$(settings-gear)"
       }
     ],
     "configuration": {
@@ -41,6 +53,16 @@
           "type": "boolean",
           "default": false,
           "description": "Controls whether the tree ID is shown in completions."
+        },
+        "forester.defaultPrefix": {
+          "type": "string",
+          "default": "",
+          "description": "Default prefix for new trees (e.g., 'jms', 'ssl'). Will be prompted if not set."
+        },
+        "forester.defaultTemplate": {
+          "type": "string",
+          "default": "",
+          "description": "Default template for new trees (e.g., 'daily', 'paper'). Will be prompted if not set. Use '(No template)' to skip template selection."
         },
         "forester.create.random": {
           "type": "boolean",
